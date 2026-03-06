@@ -1,3 +1,7 @@
+# WARNING: This thing is entirely made by AI, so it's trash. 
+
+This repo contains modifications to make the thing work on Wayland (evdev instead of pyinput, appindicator and stuff...)
+
 # 🐱 Bongo Cat ESP32 - Your Cute Digital Typing Companion
 
 ![Bongo Cat](web%20resources/cat1.png)
