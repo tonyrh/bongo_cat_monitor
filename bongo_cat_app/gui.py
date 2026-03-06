@@ -1,607 +1,559 @@
 #!/usr/bin/env python3
 """
 Bongo Cat Settings GUI
-Tkinter-based configuration interface for all application settings
+GTK3-based configuration interface — uses system theme automatically
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
+import gi
+gi.require_version('Gtk', '3.0')
+from gi.repository import Gtk, GLib
+
 from typing import Optional, Callable
 
+
 class BongoCatSettingsGUI:
-    """Settings GUI for Bongo Cat application"""
-    
-    def __init__(self, config_manager=None, engine=None, on_close_callback: Optional[Callable] = None, parent_root=None):
-        """Initialize the settings GUI"""
+    """Settings GUI built with GTK3 (inherits system theme)"""
+
+    def __init__(self, config_manager=None, engine=None,
+                 on_close_callback: Optional[Callable] = None,
+                 parent_root=None):  # parent_root ignored (tkinter compat param)
         self.config = config_manager
         self.engine = engine
         self.on_close_callback = on_close_callback
-        self.parent_root = parent_root  # Optional parent tkinter root
+
         self.window = None
         self.widgets = {}
-        
-        # Track if changes were made
         self.changes_made = False
-        self.original_config = None
-        
-        # Configuration change tracking
         self.updating_from_config = False
-        
-        # Don't auto-create window during init to allow proper parent setup
-        # Window will be created when show() is called
-    
-    def create_window(self):
-        """Create and setup the settings window"""
-        if self.window and self.window.winfo_exists():
-            self.window.lift()
-            self.window.focus_set()
+
+    # ------------------------------------------------------------------ #
+    #  Public API (same interface as original)                            #
+    # ------------------------------------------------------------------ #
+
+    def show(self):
+        if self.window and self.window.get_visible():
+            self.window.present()
             return
-        
-        # Use parent root if provided, otherwise ensure we have a root window
-        if self.parent_root:
-            # Use the provided parent root
-            root = self.parent_root
-        elif not tk._default_root:
-            # Create a hidden root window if none exists
-            root = tk.Tk()
-            root.withdraw()  # Hide it
-        else:
-            root = tk._default_root
-        
-        # Create main window as Toplevel with proper parent
-        self.window = tk.Toplevel(root)
-        self.window.title("Bongo Cat Settings")
-        self.window.geometry("500x600")
-        self.window.resizable(True, True)
-        
-        # Set window icon (if available)
-        try:
-            self.window.iconbitmap("assets/tray_icon.ico")
-        except:
-            pass  # Icon file not found, continue without it
-        
-        # Set up proper close handling
-        self.window.protocol("WM_DELETE_WINDOW", self.on_window_close)
-        
-        # Make window stay on top initially, then allow normal behavior
-        self.window.attributes('-topmost', True)
-        self.window.after(100, lambda: self.window.attributes('-topmost', False))
-        
-        # Store original configuration for comparison
-        if self.config:
-            self.original_config = {
-                'display': self.config.get_display_settings().copy(),
-                'behavior': self.config.get_behavior_settings().copy(),
-                'connection': self.config.get_connection_settings().copy(),
-                'startup': self.config.get_startup_settings().copy()
-            }
-        
-        # Create all GUI content
-        self.create_gui_content()
-        
-        # Load current settings into the GUI
+        self._build_window()
         self.load_current_settings()
-    
-    def create_gui_content(self):
-        """Create all GUI content (tabs, buttons, etc.)"""
-        try:
-            # Create notebook for tabs
-            notebook = ttk.Notebook(self.window)
-            notebook.pack(fill='both', expand=True, padx=10, pady=10)
-            
-            # Create tabs
-            self.create_display_tab(notebook)
-            self.create_behavior_tab(notebook)
-            self.create_connection_tab(notebook)
-            self.create_startup_tab(notebook)
-            
-            # Create button frame
-            button_frame = ttk.Frame(self.window)
-            button_frame.pack(fill='x', padx=10, pady=(0, 10))
-            
-            # Add buttons
-            ttk.Button(button_frame, text="Apply", command=self.apply_settings).pack(side='right', padx=(5, 0))
-            ttk.Button(button_frame, text="Save", command=self.save_settings).pack(side='right', padx=(5, 0))
-            ttk.Button(button_frame, text="Cancel", command=self.cancel_settings).pack(side='right', padx=(5, 0))
-            ttk.Button(button_frame, text="Reset to Defaults", command=self.reset_to_defaults).pack(side='left')
-            
-            # Setup change tracking after all widgets are created
-            self.setup_change_tracking()
-            
-            print("✅ GUI content created successfully")
-            
-        except Exception as e:
-            print(f"❌ Error creating GUI content: {e}")
-            import traceback
-            traceback.print_exc()
-            # If content creation fails, at least make window closeable
-            if self.window:
-                self.window.destroy()
-                self.window = None
-    
-    def create_display_tab(self, notebook):
-        """Create the display settings tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Display")
-        
-        # Main container with padding
-        main_frame = ttk.Frame(frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
-        
-        # Display elements section
-        display_group = ttk.LabelFrame(main_frame, text="Display Elements", padding=15)
-        display_group.pack(fill='x', pady=(0, 15))
-        
-        # Checkboxes for display elements
-        self.widgets['show_cpu'] = tk.BooleanVar()
-        ttk.Checkbutton(display_group, text="Show CPU Usage", 
-                       variable=self.widgets['show_cpu'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        self.widgets['show_ram'] = tk.BooleanVar()
-        ttk.Checkbutton(display_group, text="Show RAM Usage", 
-                       variable=self.widgets['show_ram'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        self.widgets['show_wpm'] = tk.BooleanVar()
-        ttk.Checkbutton(display_group, text="Show WPM Counter", 
-                       variable=self.widgets['show_wpm'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        self.widgets['show_time'] = tk.BooleanVar()
-        ttk.Checkbutton(display_group, text="Show Clock", 
-                       variable=self.widgets['show_time'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        # Time format section
-        time_group = ttk.LabelFrame(main_frame, text="Time Format", padding=15)
-        time_group.pack(fill='x', pady=(0, 15))
-        
-        self.widgets['time_format'] = tk.StringVar(value="24")
-        ttk.Radiobutton(time_group, text="24-hour format (14:30)", 
-                       variable=self.widgets['time_format'], value="24", command=self.on_setting_changed).pack(anchor='w', pady=2)
-        ttk.Radiobutton(time_group, text="12-hour format (2:30 PM)", 
-                       variable=self.widgets['time_format'], value="12", command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        # Preview section
-        preview_group = ttk.LabelFrame(main_frame, text="Preview", padding=15)
-        preview_group.pack(fill='x')
-        
-        self.widgets['preview_label'] = ttk.Label(preview_group, text="Changes will be applied to your Bongo Cat display", 
-                                                 font=('TkDefaultFont', 9), foreground='gray')
-        self.widgets['preview_label'].pack(anchor='w')
-    
-    def create_behavior_tab(self, notebook):
-        """Create the behavior settings tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Behavior")
-        
-        main_frame = ttk.Frame(frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
-        
-        # Sleep settings
-        sleep_group = ttk.LabelFrame(main_frame, text="Sleep Settings", padding=15)
-        sleep_group.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(sleep_group, text="Sleep timeout (when cat goes to sleep):").pack(anchor='w', pady=(0, 5))
-        
-        timeout_frame = ttk.Frame(sleep_group)
-        timeout_frame.pack(fill='x', pady=(0, 10))
-        
-        self.widgets['sleep_timeout'] = tk.IntVar(value=1)
-        self.widgets['sleep_scale'] = ttk.Scale(timeout_frame, from_=1, to=60, orient='horizontal',
-                                               variable=self.widgets['sleep_timeout'], command=self.on_sleep_timeout_changed)
-        self.widgets['sleep_scale'].pack(side='left', fill='x', expand=True, padx=(0, 10))
-        
-        self.widgets['sleep_label'] = ttk.Label(timeout_frame, text="1 minute", width=12)
-        self.widgets['sleep_label'].pack(side='right')
-        
-        # Animation settings  
-        anim_group = ttk.LabelFrame(main_frame, text="Animation Settings", padding=15)
-        anim_group.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(anim_group, text="Idle timeout before stopping animations:").pack(anchor='w', pady=(0, 5))
-        
-        idle_frame = ttk.Frame(anim_group)
-        idle_frame.pack(fill='x')
-        
-        self.widgets['idle_timeout'] = tk.DoubleVar(value=3.0)
-        self.widgets['idle_scale'] = ttk.Scale(idle_frame, from_=0.5, to=10.0, orient='horizontal',
-                                              variable=self.widgets['idle_timeout'], command=self.on_idle_timeout_changed)
-        self.widgets['idle_scale'].pack(side='left', fill='x', expand=True, padx=(0, 10))
-        
-        self.widgets['idle_label'] = ttk.Label(idle_frame, text="3.0 seconds", width=12)
-        self.widgets['idle_label'].pack(side='right')
-    
-    def create_connection_tab(self, notebook):
-        """Create the connection settings tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Connection")
-        
-        main_frame = ttk.Frame(frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
-        
-        # COM port settings
-        port_group = ttk.LabelFrame(main_frame, text="COM Port Settings", padding=15)
-        port_group.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(port_group, text="COM Port:").pack(anchor='w', pady=(0, 5))
-        
-        port_frame = ttk.Frame(port_group)
-        port_frame.pack(fill='x', pady=(0, 10))
-        
-        self.widgets['com_port'] = tk.StringVar(value="AUTO")
-        port_combo = ttk.Combobox(port_frame, textvariable=self.widgets['com_port'], width=15)
-        port_combo['values'] = ('AUTO', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8')
-        port_combo.pack(side='left', padx=(0, 10))
-        port_combo.bind('<<ComboboxSelected>>', lambda e: self.on_setting_changed())
-        
-        ttk.Button(port_frame, text="Scan Ports", command=self.scan_ports).pack(side='left')
-        
-        ttk.Label(port_group, text="Baudrate:").pack(anchor='w', pady=(10, 5))
-        
-        self.widgets['baudrate'] = tk.IntVar(value=115200)
-        baud_combo = ttk.Combobox(port_group, textvariable=self.widgets['baudrate'], width=15)
-        baud_combo['values'] = (9600, 19200, 38400, 57600, 115200)
-        baud_combo.pack(anchor='w')
-        baud_combo.bind('<<ComboboxSelected>>', lambda e: self.on_setting_changed())
-        
-        # Connection options
-        conn_group = ttk.LabelFrame(main_frame, text="Connection Options", padding=15)
-        conn_group.pack(fill='x', pady=(0, 15))
-        
-        self.widgets['auto_reconnect'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(conn_group, text="Auto-reconnect if connection lost", 
-                       variable=self.widgets['auto_reconnect'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        ttk.Label(conn_group, text="Connection timeout:").pack(anchor='w', pady=(10, 5))
-        
-        timeout_frame = ttk.Frame(conn_group)
-        timeout_frame.pack(fill='x')
-        
-        self.widgets['conn_timeout'] = tk.IntVar(value=5)
-        timeout_combo = ttk.Combobox(timeout_frame, textvariable=self.widgets['conn_timeout'], width=10)
-        timeout_combo['values'] = (1, 2, 3, 5, 10, 15, 30)
-        timeout_combo.pack(side='left', padx=(0, 5))
-        timeout_combo.bind('<<ComboboxSelected>>', lambda e: self.on_setting_changed())
-        
-        ttk.Label(timeout_frame, text="seconds").pack(side='left')
-    
-    def create_startup_tab(self, notebook):
-        """Create the startup settings tab"""
-        frame = ttk.Frame(notebook)
-        notebook.add(frame, text="Startup")
-        
-        main_frame = ttk.Frame(frame)
-        main_frame.pack(fill='both', expand=True, padx=20, pady=20)
-        
-        # Startup behavior
-        startup_group = ttk.LabelFrame(main_frame, text="Startup Behavior", padding=15)
-        startup_group.pack(fill='x', pady=(0, 15))
-        
-        self.widgets['start_with_windows'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(startup_group, text="Start with Windows", 
-                       variable=self.widgets['start_with_windows'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        self.widgets['start_minimized'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(startup_group, text="Start minimized to system tray", 
-                       variable=self.widgets['start_minimized'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        self.widgets['show_notifications'] = tk.BooleanVar(value=True)
-        ttk.Checkbutton(startup_group, text="Show notifications", 
-                       variable=self.widgets['show_notifications'], command=self.on_setting_changed).pack(anchor='w', pady=2)
-        
-        # Status info
-        status_group = ttk.LabelFrame(main_frame, text="Status", padding=15)
-        status_group.pack(fill='x')
-        
-        self.widgets['status_label'] = ttk.Label(status_group, text="", font=('TkDefaultFont', 9))
-        self.widgets['status_label'].pack(anchor='w')
-        
-        self.update_status_info()
-    
-    def scan_ports(self):
-        """Scan for available COM ports"""
-        try:
-            import serial.tools.list_ports
-            ports = [port.device for port in serial.tools.list_ports.comports()]
-            ports.insert(0, 'AUTO')
-            
-            # Update combobox values
-            port_combo = None
-            for widget in self.window.winfo_children():
-                if isinstance(widget, ttk.Notebook):
-                    for tab in widget.tabs():
-                        tab_frame = widget.nametowidget(tab)
-                        for child in tab_frame.winfo_children():
-                            if isinstance(child, ttk.Frame):
-                                for grandchild in child.winfo_children():
-                                    if isinstance(grandchild, ttk.LabelFrame) and "COM Port" in grandchild['text']:
-                                        for item in grandchild.winfo_children():
-                                            if isinstance(item, ttk.Frame):
-                                                for subitem in item.winfo_children():
-                                                    if isinstance(subitem, ttk.Combobox):
-                                                        port_combo = subitem
-                                                        break
-            
-            if port_combo:
-                port_combo['values'] = tuple(ports)
-                messagebox.showinfo("Port Scan", f"Found {len(ports)-1} COM ports")
-            else:
-                messagebox.showinfo("Port Scan", f"Found ports: {', '.join(ports[1:]) if len(ports) > 1 else 'None'}")
-                
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to scan ports: {e}")
-    
+        self.window.show_all()
+        self.window.present()
+
+    def mainloop(self):
+        """Compatibility shim — GTK loop is already running via tray."""
+        pass
+
+    # ------------------------------------------------------------------ #
+    #  Window construction                                                #
+    # ------------------------------------------------------------------ #
+
+    def _build_window(self):
+        self.window = Gtk.Window(title="Bongo Cat Settings")
+        self.window.set_default_size(520, 580)
+        self.window.set_resizable(True)
+        self.window.connect("delete-event", self._on_delete_event)
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.window.add(outer)
+
+        # ── Notebook ────────────────────────────────────────────────────
+        notebook = Gtk.Notebook()
+        notebook.set_margin_top(10)
+        notebook.set_margin_bottom(6)
+        notebook.set_margin_start(10)
+        notebook.set_margin_end(10)
+        outer.pack_start(notebook, True, True, 0)
+
+        self._build_display_tab(notebook)
+        self._build_behavior_tab(notebook)
+        self._build_connection_tab(notebook)
+        self._build_startup_tab(notebook)
+
+        # ── Button bar ──────────────────────────────────────────────────
+        sep = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        outer.pack_start(sep, False, False, 0)
+
+        btn_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_bar.set_margin_top(8)
+        btn_bar.set_margin_bottom(10)
+        btn_bar.set_margin_start(12)
+        btn_bar.set_margin_end(12)
+        outer.pack_start(btn_bar, False, False, 0)
+
+        btn_reset = Gtk.Button(label="Reset to Defaults")
+        btn_reset.connect("clicked", lambda _: self._reset_to_defaults())
+        btn_bar.pack_start(btn_reset, False, False, 0)
+
+        # right-aligned buttons
+        right = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        btn_bar.pack_end(right, False, False, 0)
+
+        btn_cancel = Gtk.Button(label="Cancel")
+        btn_cancel.connect("clicked", lambda _: self._cancel())
+        right.pack_start(btn_cancel, False, False, 0)
+
+        btn_apply = Gtk.Button(label="Apply")
+        btn_apply.get_style_context().add_class("suggested-action")
+        btn_apply.connect("clicked", lambda _: self._apply_settings())
+        right.pack_start(btn_apply, False, False, 0)
+
+        btn_save = Gtk.Button(label="Save")
+        btn_save.get_style_context().add_class("suggested-action")
+        btn_save.connect("clicked", lambda _: self._save_settings())
+        right.pack_start(btn_save, False, False, 0)
+
+    # ------------------------------------------------------------------ #
+    #  Tab helpers                                                        #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _tab_box():
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_top(16)
+        box.set_margin_bottom(16)
+        box.set_margin_start(16)
+        box.set_margin_end(16)
+        return box
+
+    @staticmethod
+    def _group(label: str) -> tuple:
+        """Return (frame_widget, inner_box) for a labelled group."""
+        frame = Gtk.Frame(label=f"  {label}  ")
+        frame.set_label_align(0.02, 0.5)
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        inner.set_margin_top(10)
+        inner.set_margin_bottom(10)
+        inner.set_margin_start(12)
+        inner.set_margin_end(12)
+        frame.add(inner)
+        return frame, inner
+
+    def _check(self, label: str, key: str, box: Gtk.Box):
+        cb = Gtk.CheckButton(label=label)
+        cb.connect("toggled", lambda w: self._mark_changed())
+        self.widgets[key] = cb
+        box.pack_start(cb, False, False, 0)
+
+    # ------------------------------------------------------------------ #
+    #  Display tab                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_display_tab(self, nb: Gtk.Notebook):
+        page = self._tab_box()
+        nb.append_page(page, Gtk.Label(label="Display"))
+
+        # Elements group
+        f, inner = self._group("Display Elements")
+        page.pack_start(f, False, False, 0)
+        self._check("Show CPU Usage",    'show_cpu',  inner)
+        self._check("Show RAM Usage",    'show_ram',  inner)
+        self._check("Show WPM Counter",  'show_wpm',  inner)
+        self._check("Show Clock",        'show_time', inner)
+
+        # Time format group
+        f2, inner2 = self._group("Time Format")
+        page.pack_start(f2, False, False, 0)
+
+        self.widgets['time_format'] = Gtk.ComboBoxText()
+        self.widgets['time_format'].append("24", "24-hour format (14:30)")
+        self.widgets['time_format'].append("12", "12-hour format (2:30 PM)")
+        self.widgets['time_format'].set_active(0)
+        self.widgets['time_format'].connect("changed", lambda w: self._mark_changed())
+        inner2.pack_start(self.widgets['time_format'], False, False, 0)
+
+        # Preview label
+        self.widgets['preview_label'] = Gtk.Label(
+            label="Changes will be applied to your Bongo Cat display")
+        self.widgets['preview_label'].set_halign(Gtk.Align.START)
+        self.widgets['preview_label'].get_style_context().add_class("dim-label")
+        page.pack_start(self.widgets['preview_label'], False, False, 4)
+
+    # ------------------------------------------------------------------ #
+    #  Behavior tab                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _build_behavior_tab(self, nb: Gtk.Notebook):
+        page = self._tab_box()
+        nb.append_page(page, Gtk.Label(label="Behavior"))
+
+        # Sleep
+        f, inner = self._group("Sleep Settings")
+        page.pack_start(f, False, False, 0)
+
+        inner.pack_start(Gtk.Label(label="Sleep timeout (minutes):", xalign=0), False, False, 0)
+
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.widgets['sleep_timeout'] = Gtk.Adjustment(value=1, lower=1, upper=60, step_increment=1)
+        scale = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.widgets['sleep_timeout'])
+        scale.set_digits(0)
+        scale.set_hexpand(True)
+        self.widgets['sleep_timeout'].connect("value-changed", self._on_sleep_changed)
+        self.widgets['sleep_label'] = Gtk.Label(label="1 minute")
+        self.widgets['sleep_label'].set_width_chars(12)
+        row.pack_start(scale, True, True, 0)
+        row.pack_start(self.widgets['sleep_label'], False, False, 0)
+        inner.pack_start(row, False, False, 0)
+
+        # Idle
+        f2, inner2 = self._group("Animation Settings")
+        page.pack_start(f2, False, False, 0)
+
+        inner2.pack_start(Gtk.Label(label="Idle timeout before stopping animations:", xalign=0), False, False, 0)
+
+        row2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.widgets['idle_timeout'] = Gtk.Adjustment(value=3.0, lower=0.5, upper=10.0, step_increment=0.5)
+        scale2 = Gtk.Scale(orientation=Gtk.Orientation.HORIZONTAL, adjustment=self.widgets['idle_timeout'])
+        scale2.set_digits(1)
+        scale2.set_hexpand(True)
+        self.widgets['idle_timeout'].connect("value-changed", self._on_idle_changed)
+        self.widgets['idle_label'] = Gtk.Label(label="3.0 seconds")
+        self.widgets['idle_label'].set_width_chars(12)
+        row2.pack_start(scale2, True, True, 0)
+        row2.pack_start(self.widgets['idle_label'], False, False, 0)
+        inner2.pack_start(row2, False, False, 0)
+
+    # ------------------------------------------------------------------ #
+    #  Connection tab                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _build_connection_tab(self, nb: Gtk.Notebook):
+        page = self._tab_box()
+        nb.append_page(page, Gtk.Label(label="Connection"))
+
+        f, inner = self._group("Serial Port Settings")
+        page.pack_start(f, False, False, 0)
+
+        # Port row
+        port_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        port_row.pack_start(Gtk.Label(label="Port:", xalign=0), False, False, 0)
+        self.widgets['com_port'] = Gtk.ComboBoxText.new_with_entry()
+        for p in ("AUTO", "/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyACM0", "/dev/ttyACM1"):
+            self.widgets['com_port'].append_text(p)
+        self.widgets['com_port'].set_active(0)
+        self.widgets['com_port'].connect("changed", lambda w: self._mark_changed())
+        port_row.pack_start(self.widgets['com_port'], True, True, 0)
+        btn_scan = Gtk.Button(label="Scan")
+        btn_scan.connect("clicked", lambda _: self._scan_ports())
+        port_row.pack_start(btn_scan, False, False, 0)
+        inner.pack_start(port_row, False, False, 0)
+
+        # Baudrate row
+        baud_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        baud_row.pack_start(Gtk.Label(label="Baudrate:", xalign=0), False, False, 0)
+        self.widgets['baudrate'] = Gtk.ComboBoxText()
+        for b in ("9600", "19200", "38400", "57600", "115200"):
+            self.widgets['baudrate'].append_text(b)
+        self.widgets['baudrate'].set_active(4)  # 115200
+        self.widgets['baudrate'].connect("changed", lambda w: self._mark_changed())
+        baud_row.pack_start(self.widgets['baudrate'], False, False, 0)
+        inner.pack_start(baud_row, False, False, 0)
+
+        # Options group
+        f2, inner2 = self._group("Connection Options")
+        page.pack_start(f2, False, False, 0)
+
+        self._check("Auto-reconnect if connection lost", 'auto_reconnect', inner2)
+
+        timeout_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        timeout_row.pack_start(Gtk.Label(label="Timeout:", xalign=0), False, False, 0)
+        self.widgets['conn_timeout'] = Gtk.ComboBoxText()
+        for t in ("1", "2", "3", "5", "10", "15", "30"):
+            self.widgets['conn_timeout'].append_text(t)
+        self.widgets['conn_timeout'].set_active(3)  # 5s
+        self.widgets['conn_timeout'].connect("changed", lambda w: self._mark_changed())
+        timeout_row.pack_start(self.widgets['conn_timeout'], False, False, 0)
+        timeout_row.pack_start(Gtk.Label(label="seconds"), False, False, 0)
+        inner2.pack_start(timeout_row, False, False, 0)
+
+    # ------------------------------------------------------------------ #
+    #  Startup tab                                                        #
+    # ------------------------------------------------------------------ #
+
+    def _build_startup_tab(self, nb: Gtk.Notebook):
+        page = self._tab_box()
+        nb.append_page(page, Gtk.Label(label="Startup"))
+
+        f, inner = self._group("Startup Behavior")
+        page.pack_start(f, False, False, 0)
+
+        self._check("Start on login",               'start_on_login',    inner)
+        self._check("Start minimized to tray",      'start_minimized',   inner)
+        self._check("Show notifications",           'show_notifications', inner)
+
+        # Status group
+        f2, inner2 = self._group("Status")
+        page.pack_start(f2, False, False, 0)
+
+        self.widgets['status_label'] = Gtk.Label(label="", xalign=0)
+        self.widgets['status_label'].get_style_context().add_class("dim-label")
+        inner2.pack_start(self.widgets['status_label'], False, False, 0)
+        self._update_status_info()
+
+    # ------------------------------------------------------------------ #
+    #  Settings load / save                                               #
+    # ------------------------------------------------------------------ #
+
     def load_current_settings(self):
-        """Load current settings from config manager into GUI"""
         if not self.config:
             return
-        
         self.updating_from_config = True
-        
         try:
-            # Load display settings
-            display = self.config.get_display_settings()
-            self.widgets['show_cpu'].set(display.get('show_cpu', True))
-            self.widgets['show_ram'].set(display.get('show_ram', True))
-            self.widgets['show_wpm'].set(display.get('show_wpm', True))
-            self.widgets['show_time'].set(display.get('show_time', True))
-            self.widgets['time_format'].set('24' if display.get('time_format_24h', True) else '12')
-            
-            # Load behavior settings
-            behavior = self.config.get_behavior_settings()
-            self.widgets['sleep_timeout'].set(behavior.get('sleep_timeout_minutes', 1))
-    
-            self.widgets['idle_timeout'].set(behavior.get('idle_timeout_seconds', 3.0))
-            
-            # Load connection settings
-            connection = self.config.get_connection_settings()
-            self.widgets['com_port'].set(connection.get('com_port', 'AUTO'))
-            self.widgets['baudrate'].set(connection.get('baudrate', 115200))
-            self.widgets['auto_reconnect'].set(connection.get('auto_reconnect', True))
-            self.widgets['conn_timeout'].set(connection.get('timeout_seconds', 5))
-            
-            # Load startup settings
-            startup = self.config.get_startup_settings()
-            self.widgets['start_with_windows'].set(startup.get('start_with_windows', True))
-            self.widgets['start_minimized'].set(startup.get('start_minimized', True))
-            self.widgets['show_notifications'].set(startup.get('show_notifications', True))
-            
-            # Update labels
-            self.update_slider_labels()
-            
+            d = self.config.get_display_settings()
+            self.widgets['show_cpu'].set_active(d.get('show_cpu', True))
+            self.widgets['show_ram'].set_active(d.get('show_ram', True))
+            self.widgets['show_wpm'].set_active(d.get('show_wpm', True))
+            self.widgets['show_time'].set_active(d.get('show_time', True))
+            self.widgets['time_format'].set_active_id(
+                '24' if d.get('time_format_24h', True) else '12')
+
+            b = self.config.get_behavior_settings()
+            self.widgets['sleep_timeout'].set_value(b.get('sleep_timeout_minutes', 1))
+            self.widgets['idle_timeout'].set_value(b.get('idle_timeout_seconds', 3.0))
+
+            c = self.config.get_connection_settings()
+            port = c.get('com_port', 'AUTO')
+            entry = self.widgets['com_port'].get_child()
+            if entry:
+                entry.set_text(port)
+            baud = str(c.get('baudrate', 115200))
+            self._set_combotext(self.widgets['baudrate'], baud)
+            self.widgets['auto_reconnect'].set_active(c.get('auto_reconnect', True))
+            self._set_combotext(self.widgets['conn_timeout'], str(c.get('timeout_seconds', 5)))
+
+            s = self.config.get_startup_settings()
+            self.widgets['start_on_login'].set_active(s.get('start_on_login', False))
+            self.widgets['start_minimized'].set_active(s.get('start_minimized', True))
+            self.widgets['show_notifications'].set_active(s.get('show_notifications', True))
+
+            self._update_slider_labels()
         finally:
             self.updating_from_config = False
-    
-    def setup_change_tracking(self):
-        """Setup change tracking for all widgets"""
-        # This is already handled by the command callbacks in widget creation
-        pass
-    
-    def on_setting_changed(self):
-        """Called when any setting is changed"""
-        if self.updating_from_config:
-            return
-        
-        self.changes_made = True
-        self.update_preview()
-    
-    def on_sleep_timeout_changed(self, value):
-        """Handle sleep timeout slider change"""
-        if self.updating_from_config:
-            return
-        
-        minutes = int(float(value))
-        self.widgets['sleep_label'].config(text=f"{minutes} minute{'s' if minutes != 1 else ''}")
-        self.on_setting_changed()
-    
 
-    def on_idle_timeout_changed(self, value):
-        """Handle idle timeout slider change"""
-        if self.updating_from_config:
-            return
-        
-        timeout = float(value)
-        self.widgets['idle_label'].config(text=f"{timeout:.1f} second{'s' if timeout != 1.0 else ''}")
-        self.on_setting_changed()
-    
-    def update_slider_labels(self):
-        """Update all slider labels with current values"""
-        if 'sleep_label' in self.widgets:
-            minutes = self.widgets['sleep_timeout'].get()
-            self.widgets['sleep_label'].config(text=f"{minutes} minute{'s' if minutes != 1 else ''}")
-        
-        if 'sens_label' in self.widgets:
-            sens = self.widgets['sensitivity'].get()
-            self.widgets['sens_label'].config(text=f"{sens:.1f}x")
-        
-        if 'idle_label' in self.widgets:
-            timeout = self.widgets['idle_timeout'].get()
-            self.widgets['idle_label'].config(text=f"{timeout:.1f} second{'s' if timeout != 1.0 else ''}")
-    
-    def update_preview(self):
-        """Update the preview text"""
-        if 'preview_label' in self.widgets:
-            if self.changes_made:
-                self.widgets['preview_label'].config(text="● Settings modified - click Apply or Save to update", 
-                                                    foreground='orange')
-            else:
-                self.widgets['preview_label'].config(text="Changes will be applied to your Bongo Cat display", 
-                                                    foreground='gray')
-    
-    def update_status_info(self):
-        """Update status information"""
-        if 'status_label' in self.widgets and self.config:
-            config_file = self.config.config_file
-            status_text = f"Configuration file: {config_file}"
-            self.widgets['status_label'].config(text=status_text)
-    
-    def apply_settings(self):
-        """Apply current settings without saving to file"""
+    @staticmethod
+    def _set_combotext(combo: Gtk.ComboBoxText, value: str):
+        model = combo.get_model()
+        for i, row in enumerate(model):
+            if row[0] == value:
+                combo.set_active(i)
+                return
+        combo.set_active(0)
+
+    def _collect_settings(self) -> dict:
+        baud_text = self.widgets['baudrate'].get_active_text() or "115200"
+        timeout_text = self.widgets['conn_timeout'].get_active_text() or "5"
+        port_entry = self.widgets['com_port'].get_child()
+        port = port_entry.get_text() if port_entry else "AUTO"
+        return {
+            'display': {
+                'show_cpu':         self.widgets['show_cpu'].get_active(),
+                'show_ram':         self.widgets['show_ram'].get_active(),
+                'show_wpm':         self.widgets['show_wpm'].get_active(),
+                'show_time':        self.widgets['show_time'].get_active(),
+                'time_format_24h':  self.widgets['time_format'].get_active_id() == '24',
+            },
+            'behavior': {
+                'sleep_timeout_minutes': int(self.widgets['sleep_timeout'].get_value()),
+                'idle_timeout_seconds':  round(self.widgets['idle_timeout'].get_value(), 1),
+            },
+            'connection': {
+                'com_port':       port,
+                'baudrate':       int(baud_text),
+                'auto_reconnect': self.widgets['auto_reconnect'].get_active(),
+                'timeout_seconds': int(timeout_text),
+            },
+            'startup': {
+                'start_on_login':    self.widgets['start_on_login'].get_active(),
+                'start_minimized':   self.widgets['start_minimized'].get_active(),
+                'show_notifications': self.widgets['show_notifications'].get_active(),
+            },
+        }
+
+    def _apply_settings(self):
         if not self.config:
-            messagebox.showerror("Error", "No configuration manager available")
+            self._error("No configuration manager available")
             return
-        
         try:
-            # Apply display settings
-            self.config.set_setting('display', 'show_cpu', self.widgets['show_cpu'].get())
-            self.config.set_setting('display', 'show_ram', self.widgets['show_ram'].get())
-            self.config.set_setting('display', 'show_wpm', self.widgets['show_wpm'].get())
-            self.config.set_setting('display', 'show_time', self.widgets['show_time'].get())
-            self.config.set_setting('display', 'time_format_24h', self.widgets['time_format'].get() == '24')
-            
-            # Apply behavior settings
-            self.config.set_setting('behavior', 'sleep_timeout_minutes', self.widgets['sleep_timeout'].get())
-    
-            self.config.set_setting('behavior', 'idle_timeout_seconds', self.widgets['idle_timeout'].get())
-            
-            # Apply connection settings
-            self.config.set_setting('connection', 'com_port', self.widgets['com_port'].get())
-            self.config.set_setting('connection', 'baudrate', self.widgets['baudrate'].get())
-            self.config.set_setting('connection', 'auto_reconnect', self.widgets['auto_reconnect'].get())
-            self.config.set_setting('connection', 'timeout_seconds', self.widgets['conn_timeout'].get())
-            
-            # Apply startup settings
-            self.config.set_setting('startup', 'start_with_windows', self.widgets['start_with_windows'].get())
-            self.config.set_setting('startup', 'start_minimized', self.widgets['start_minimized'].get())
-            self.config.set_setting('startup', 'show_notifications', self.widgets['show_notifications'].get())
-            
-            # Apply settings to Arduino immediately if engine is available
+            s = self._collect_settings()
+            for section, values in s.items():
+                for key, val in values.items():
+                    self.config.set_setting(section, key, val)
+
             if self.engine and hasattr(self.engine, 'apply_all_config_to_arduino'):
                 try:
                     self.engine.apply_all_config_to_arduino()
-                    print("✅ Settings applied to Arduino immediately")
                 except Exception as e:
-                    print(f"⚠️ Failed to apply settings to Arduino: {e}")
-            
+                    print(f"⚠️ Arduino apply error: {e}")
+
             self.changes_made = False
-            self.update_preview()
-            messagebox.showinfo("Success", "Settings applied successfully and sent to Arduino!")
-            
+            self._update_preview()
+            self._info("Settings applied successfully!")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to apply settings: {e}")
-    
-    def save_settings(self):
-        """Save current settings to file and Arduino"""
-        self.apply_settings()
-        
+            self._error(f"Failed to apply settings: {e}")
+
+    def _save_settings(self):
+        self._apply_settings()
         if self.config:
             if self.config.save_config():
-                # Also save to Arduino EEPROM if engine is available
                 if self.engine and hasattr(self.engine, 'save_config_to_arduino'):
                     self.engine.save_config_to_arduino()
-                    messagebox.showinfo("Success", "Settings saved to file and Arduino EEPROM!")
-                else:
-                    messagebox.showinfo("Success", "Settings saved to file!")
+                self._info("Settings saved!")
             else:
-                messagebox.showerror("Error", "Failed to save settings to file")
-    
-    def cancel_settings(self):
-        """Cancel changes and revert to original settings"""
+                self._error("Failed to save settings to file")
+
+    def _cancel(self):
         if self.changes_made:
-            if messagebox.askyesno("Confirm", "Discard all changes?"):
+            if self._ask("Discard all changes?"):
                 self.load_current_settings()
                 self.changes_made = False
-                self.update_preview()
+                self._update_preview()
         else:
-            self.close_window()
-    
-    def reset_to_defaults(self):
-        """Reset all settings to defaults"""
-        if messagebox.askyesno("Confirm", "Reset all settings to defaults?"):
+            self._close()
+
+    def _reset_to_defaults(self):
+        if self._ask("Reset all settings to defaults?"):
             if self.config:
                 self.config.reset_to_defaults()
                 self.load_current_settings()
                 self.changes_made = True
-                self.update_preview()
-                messagebox.showinfo("Reset", "Settings reset to defaults. Click Apply or Save to confirm.")
-    
-    def on_window_close(self):
-        """Handle window close event"""
+                self._update_preview()
+
+    # ------------------------------------------------------------------ #
+    #  UI helpers                                                         #
+    # ------------------------------------------------------------------ #
+
+    def _mark_changed(self):
+        if self.updating_from_config:
+            return
+        self.changes_made = True
+        self._update_preview()
+
+    def _on_sleep_changed(self, adj):
+        v = int(adj.get_value())
+        self.widgets['sleep_label'].set_text(f"{v} minute{'s' if v != 1 else ''}")
+        self._mark_changed()
+
+    def _on_idle_changed(self, adj):
+        v = adj.get_value()
+        self.widgets['idle_label'].set_text(f"{v:.1f} second{'s' if v != 1.0 else ''}")
+        self._mark_changed()
+
+    def _update_slider_labels(self):
+        self._on_sleep_changed(self.widgets['sleep_timeout'])
+        self._on_idle_changed(self.widgets['idle_timeout'])
+
+    def _update_preview(self):
+        lbl = self.widgets.get('preview_label')
+        if not lbl:
+            return
+        if self.changes_made:
+            lbl.set_text("● Settings modified — click Apply or Save to update")
+        else:
+            lbl.set_text("Changes will be applied to your Bongo Cat display")
+
+    def _update_status_info(self):
+        lbl = self.widgets.get('status_label')
+        if lbl and self.config:
+            lbl.set_text(f"Config file: {self.config.config_file}")
+
+    def _scan_ports(self):
         try:
-            if self.changes_made:
-                result = messagebox.askyesnocancel("Unsaved Changes", 
-                                                 "You have unsaved changes. Save before closing?")
-                if result is True:  # Yes - save
-                    self.save_settings()
-                    self.close_window()
-                elif result is False:  # No - discard
-                    self.close_window()
-                # Cancel - do nothing
-            else:
-                self.close_window()
+            import serial.tools.list_ports
+            ports = ["AUTO"] + [p.device for p in serial.tools.list_ports.comports()]
+            combo = self.widgets['com_port']
+            combo.remove_all()
+            for p in ports:
+                combo.append_text(p)
+            combo.set_active(0)
+            self._info(f"Found {len(ports)-1} serial port(s)")
         except Exception as e:
-            print(f"❌ Error in window close handler: {e}")
-            # Force close anyway
-            self.close_window()
-    
-    def close_window(self):
-        """Close the settings window"""
-        try:
-            if self.window:
-                print("🗂️ Closing settings window...")
-                self.window.destroy()
-                self.window = None
-                print("✅ Settings window closed")
-            
-            if self.on_close_callback:
-                self.on_close_callback()
-                
-        except Exception as e:
-            print(f"❌ Error closing window: {e}")
-            # Force cleanup
+            self._error(f"Scan failed: {e}")
+
+    # ------------------------------------------------------------------ #
+    #  Dialogs                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _dialog(self, dtype, msg):
+        d = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=dtype,
+            buttons=Gtk.ButtonsType.OK,
+            text=msg,
+        )
+        d.run()
+        d.destroy()
+
+    def _info(self, msg):
+        self._dialog(Gtk.MessageType.INFO, msg)
+
+    def _error(self, msg):
+        self._dialog(Gtk.MessageType.ERROR, msg)
+
+    def _ask(self, msg) -> bool:
+        d = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.QUESTION,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=msg,
+        )
+        resp = d.run()
+        d.destroy()
+        return resp == Gtk.ResponseType.YES
+
+    # ------------------------------------------------------------------ #
+    #  Window lifecycle                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _on_delete_event(self, window, event):
+        if self.changes_made:
+            d = Gtk.MessageDialog(
+                transient_for=self.window,
+                modal=True,
+                message_type=Gtk.MessageType.QUESTION,
+                buttons=Gtk.ButtonsType.NONE,
+                text="You have unsaved changes. Save before closing?",
+            )
+            d.add_buttons("Discard", Gtk.ResponseType.NO,
+                          "Cancel",  Gtk.ResponseType.CANCEL,
+                          "Save",    Gtk.ResponseType.YES)
+            resp = d.run()
+            d.destroy()
+            if resp == Gtk.ResponseType.YES:
+                self._save_settings()
+                self._close()
+            elif resp == Gtk.ResponseType.NO:
+                self._close()
+            # CANCEL → do nothing, keep window open
+            return True  # prevent default close
+        self._close()
+        return True
+
+    def _close(self):
+        if self.window:
+            self.window.hide()
             self.window = None
-            if self.on_close_callback:
-                try:
-                    self.on_close_callback()
-                except:
-                    pass
-    
-    def show(self):
-        """Show the settings window"""
-        try:
-            if not self.window or not self.window.winfo_exists():
-                print("🔧 Creating new settings window...")
-                self.create_window()
-            else:
-                print("🔧 Showing existing settings window...")
-                # Reload settings for existing window
-                self.load_current_settings()
-            
-            if self.window:
-                # Show and focus the window
-                self.window.deiconify()  # Make sure it's not minimized
-                self.window.lift()
-                self.window.focus_set()
-                print("✅ Settings window displayed")
-            else:
-                print("❌ Failed to create settings window")
-                
-        except Exception as e:
-            print(f"❌ Error showing settings window: {e}")
-            if self.window:
-                try:
-                    self.window.destroy()
-                except:
-                    pass
-                self.window = None
+        if self.on_close_callback:
+            self.on_close_callback()
+
+
+# --------------------------------------------------------------------------- #
+#  Standalone test                                                             #
+# --------------------------------------------------------------------------- #
 
 def main():
-    """Test the settings GUI independently"""
-    from config import ConfigManager
-    
-    print("🧪 Testing Settings GUI...")
-    
-    # Create config manager
-    config = ConfigManager()
-    
-    # Create and show GUI (no engine for standalone testing)
-    gui = BongoCatSettingsGUI(config_manager=config, engine=None)
+    print("🧪 Testing Settings GUI (GTK3)…")
+    try:
+        from config import ConfigManager
+        config = ConfigManager()
+    except Exception:
+        config = None
+
+    gui = BongoCatSettingsGUI(config_manager=config)
     gui.show()
-    
-    # Run main loop
-    if gui.window:
-        gui.window.mainloop()
-    
-    print("✅ Settings GUI test completed")
+    Gtk.main()
+    print("✅ Done")
+
 
 if __name__ == "__main__":
     main()

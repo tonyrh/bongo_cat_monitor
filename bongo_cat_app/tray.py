@@ -1,443 +1,382 @@
 #!/usr/bin/env python3
 """
 Bongo Cat System Tray Integration
-Provides system tray icon, menu, and background operation
+Uses AppIndicator3 directly for Wayland/Hyprland/Waybar compatibility
 """
 
-import pystray
-from pystray import MenuItem as item
-from PIL import Image, ImageDraw
+import gi
+gi.require_version('AppIndicator3', '0.1')
+gi.require_version('Gtk', '3.0')
+from gi.repository import AppIndicator3, Gtk, GLib
+
 import threading
 import sys
 import os
+import tempfile
 from typing import Optional, Callable
+from PIL import Image, ImageDraw
+
 
 class BongoCatSystemTray:
-    """System tray integration for Bongo Cat application"""
-    
+    """System tray integration using AppIndicator3 natively (Wayland/Hyprland compatible)"""
+
     def __init__(self, config_manager=None, engine=None, on_exit_callback: Optional[Callable] = None):
-        """Initialize system tray"""
         self.config = config_manager
         self.engine = engine
         self.on_exit_callback = on_exit_callback
-        
-        self.icon = None
-        self.settings_gui = None
+
         self.running = False
-        self.tk_root = None  # Will be set by main app
-        
+        self.settings_gui = None
+        self._icon_tmp = None
+        self._indicator = None
+        self._gtk_thread = None
+
         # Status tracking
         self.connection_status = "disconnected"
         self.last_wpm = 0
         self.typing_active = False
-        
 
-        
-        # Create tray icon
-        self.create_icon()
-    
-    def set_tkinter_root(self, root):
-        """Set the tkinter root window for GUI operations"""
-        self.tk_root = root
-    
-    def start_detached(self):
-        """Start system tray using run_detached for proper GUI coexistence"""
-        if self.icon:
-            print("🚀 Starting pystray with run_detached()...")
-            self.running = True
-            self.icon.run_detached()
+        self._create_indicator()
+
+    # ------------------------------------------------------------------ #
+    #  Icon creation                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _get_icon_path(self) -> str:
+        """Find or generate icon, return path to PNG file"""
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
         else:
-            print("❌ No tray icon created")
-    
-    def create_icon(self):
-        """Create the system tray icon"""
-        try:
-            # Try to load icon from file first - check multiple formats
-            # Support both development and exe paths
-            import sys
-            if getattr(sys, 'frozen', False):
-                # Running as exe - assets are in the same directory
-                base_path = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
-            else:
-                # Running as script - look in bongo_cat_app/assets
-                base_path = os.path.dirname(__file__)
-            
-            possible_paths = [
-                os.path.join(base_path, "assets", "tray_icon.ico"),
-                os.path.join(base_path, "assets", "tray_icon.png"),
-                os.path.join(base_path, "assets", "tray_icon.jpg"),
-                os.path.join(base_path, "assets", "tray_icon.jpeg"),
-                # Fallback paths for development
-                "assets/tray_icon.png",
-                "bongo_cat_app/assets/tray_icon.png"
-            ]
-            
-            icon_image = None
-            for icon_path in possible_paths:
-                if os.path.exists(icon_path):
-                    print(f"🎨 Loading custom icon: {icon_path}")
-                    icon_image = Image.open(icon_path)
-                    # Resize to 64x64 for system tray
-                    icon_image = icon_image.resize((64, 64), Image.Resampling.LANCZOS)
-                    break
-            
-            if icon_image is None:
-                # Create a simple cat icon if no file found
-                print("🎨 Using generated cat icon")
-                icon_image = self.create_cat_icon()
-                
-        except Exception as e:
-            print(f"⚠️ Icon loading error: {e}")
-            # Fallback to generated icon
-            icon_image = self.create_cat_icon()
-        
-        # Create pystray icon
-        self.icon = pystray.Icon(
-            "BongoCat",
-            icon_image,
-            "Bongo Cat - Typing Monitor",
-            menu=self.create_menu()
-        )
-    
-    def create_cat_icon(self, size=64):
-        """Create a simple cat icon programmatically"""
-        # Create image with transparent background
+            base_path = os.path.dirname(__file__)
+
+        candidates = [
+            os.path.join(base_path, "assets", "tray_icon.png"),
+            os.path.join(base_path, "assets", "tray_icon.ico"),
+            "assets/tray_icon.png",
+            "bongo_cat_app/assets/tray_icon.png",
+        ]
+
+        for path in candidates:
+            if os.path.exists(path):
+                print(f"🎨 Using icon: {path}")
+                img = Image.open(path).resize((64, 64), Image.Resampling.LANCZOS).convert("RGBA")
+                tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                img.save(tmp.name)
+                return tmp.name
+
+        print("🎨 Generating cat icon")
+        img = self._create_cat_icon()
+        tmp = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        img.save(tmp.name)
+        return tmp.name
+
+    def _create_cat_icon(self, size=64) -> Image.Image:
+        """Generate a simple cat face icon"""
         image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
-        
-        # Draw simple cat face
-        # Face (circle)
-        face_margin = size // 8
-        draw.ellipse([face_margin, face_margin, size-face_margin, size-face_margin], 
-                    fill=(100, 100, 100, 255), outline=(50, 50, 50, 255), width=2)
-        
-        # Ears (triangles)
-        ear_size = size // 6
-        # Left ear
-        draw.polygon([(face_margin, face_margin + ear_size), 
-                     (face_margin + ear_size, face_margin), 
-                     (face_margin + ear_size*2, face_margin + ear_size)], 
-                    fill=(100, 100, 100, 255))
-        # Right ear  
-        draw.polygon([(size - face_margin - ear_size*2, face_margin + ear_size),
-                     (size - face_margin - ear_size, face_margin),
-                     (size - face_margin, face_margin + ear_size)],
-                    fill=(100, 100, 100, 255))
-        
-        # Eyes
-        eye_y = face_margin + size // 4
-        eye_size = size // 12
-        # Left eye
-        draw.ellipse([face_margin + size//4 - eye_size, eye_y - eye_size,
-                     face_margin + size//4 + eye_size, eye_y + eye_size],
-                    fill=(0, 0, 0, 255))
-        # Right eye
-        draw.ellipse([size - face_margin - size//4 - eye_size, eye_y - eye_size,
-                     size - face_margin - size//4 + eye_size, eye_y + eye_size],
-                    fill=(0, 0, 0, 255))
-        
-        # Nose (small triangle)
-        nose_y = eye_y + size // 8
-        nose_size = size // 20
-        draw.polygon([(size//2, nose_y - nose_size),
-                     (size//2 - nose_size, nose_y + nose_size),
-                     (size//2 + nose_size, nose_y + nose_size)],
-                    fill=(255, 100, 100, 255))
-        
+
+        m = size // 8
+        draw.ellipse([m, m, size - m, size - m],
+                     fill=(100, 100, 100, 255), outline=(50, 50, 50, 255), width=2)
+
+        es = size // 6
+        draw.polygon([(m, m + es), (m + es, m), (m + es * 2, m + es)],
+                     fill=(100, 100, 100, 255))
+        draw.polygon([(size - m - es * 2, m + es), (size - m - es, m), (size - m, m + es)],
+                     fill=(100, 100, 100, 255))
+
+        ey = m + size // 4
+        ez = size // 12
+        draw.ellipse([m + size // 4 - ez, ey - ez, m + size // 4 + ez, ey + ez], fill=(0, 0, 0, 255))
+        draw.ellipse([size - m - size // 4 - ez, ey - ez, size - m - size // 4 + ez, ey + ez], fill=(0, 0, 0, 255))
+
+        ny = ey + size // 8
+        ns = size // 20
+        draw.polygon([(size // 2, ny - ns), (size // 2 - ns, ny + ns), (size // 2 + ns, ny + ns)],
+                     fill=(255, 100, 100, 255))
+
         return image
-    
-    def create_menu(self):
-        """Create the system tray context menu"""
-        return pystray.Menu(
-            item(
-                "Bongo Cat Monitor",
-                self.show_about,
-                default=True
-            ),
-            pystray.Menu.SEPARATOR,
-            item(
-                "Settings...",
-                self.show_settings
-            ),
-            item(
-                "Connection",
-                pystray.Menu(
-                    item(
-                        self.get_connection_status,
-                        None,
-                        enabled=False
-                    ),
-                    pystray.Menu.SEPARATOR,
-                    item(
-                        "Reconnect",
-                        self.reconnect_device,
-                        enabled=lambda item: self.connection_status != "connected"
-                    ),
-                    item(
-                        "Disconnect", 
-                        self.disconnect_device,
-                        enabled=lambda item: self.connection_status == "connected"
-                    )
-                )
-            ),
 
-            pystray.Menu.SEPARATOR,
-            item(
-                "Start with Windows",
-                self.toggle_startup,
-                checked=lambda item: self.get_startup_setting()
-            ),
-            item(
-                "Show Notifications",
-                self.toggle_notifications,
-                checked=lambda item: self.get_notifications_setting()
-            ),
-            pystray.Menu.SEPARATOR,
-            item(
-                "Exit",
-                self.exit_application
-            )
+    # ------------------------------------------------------------------ #
+    #  Indicator setup                                                     #
+    # ------------------------------------------------------------------ #
+
+    def _create_indicator(self):
+        """Create AppIndicator3 indicator and GTK menu"""
+        self._icon_path = self._get_icon_path()
+
+        self._indicator = AppIndicator3.Indicator.new(
+            "BongoCat",
+            self._icon_path,
+            AppIndicator3.IndicatorCategory.APPLICATION_STATUS
         )
-    
-    def get_connection_status(self, item=None):
-        """Get current connection status text"""
-        status_map = {
-            "connected": "[✓] Connected to ESP32",
-            "connecting": "[~] Connecting...",
-            "disconnected": "[✗] Disconnected", 
-            "error": "[!] Connection Error"
+        self._indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+        self._indicator.set_title("Bongo Cat - Typing Monitor")
+
+        self._rebuild_menu()
+
+    def _rebuild_menu(self):
+        """Build (or rebuild) the GTK context menu"""
+        menu = Gtk.Menu()
+
+        # Header (non-clickable label)
+        header = Gtk.MenuItem(label="🐱 Bongo Cat Monitor")
+        header.set_sensitive(False)
+        menu.append(header)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Connection status (non-clickable)
+        self._status_item = Gtk.MenuItem(label=self._connection_label())
+        self._status_item.set_sensitive(False)
+        menu.append(self._status_item)
+
+        # Reconnect
+        reconnect_item = Gtk.MenuItem(label="Reconnect")
+        reconnect_item.connect("activate", lambda _: self.reconnect_device())
+        reconnect_item.set_sensitive(self.connection_status != "connected")
+        menu.append(reconnect_item)
+
+        # Disconnect
+        disconnect_item = Gtk.MenuItem(label="Disconnect")
+        disconnect_item.connect("activate", lambda _: self.disconnect_device())
+        disconnect_item.set_sensitive(self.connection_status == "connected")
+        menu.append(disconnect_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Settings
+        settings_item = Gtk.MenuItem(label="Settings…")
+        settings_item.connect("activate", lambda _: self.show_settings())
+        menu.append(settings_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Autostart toggle
+        self._autostart_item = Gtk.CheckMenuItem(label="Start on login")
+        self._autostart_item.set_active(self._get_autostart())
+        self._autostart_item.connect("toggled", self._on_autostart_toggled)
+        menu.append(self._autostart_item)
+
+        # Notifications toggle
+        self._notif_item = Gtk.CheckMenuItem(label="Show Notifications")
+        self._notif_item.set_active(self._get_notifications())
+        self._notif_item.connect("toggled", self._on_notifications_toggled)
+        menu.append(self._notif_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        # Exit
+        exit_item = Gtk.MenuItem(label="Exit")
+        exit_item.connect("activate", lambda _: self.exit_application())
+        menu.append(exit_item)
+
+        menu.show_all()
+        self._indicator.set_menu(menu)
+        self._menu = menu
+
+    # ------------------------------------------------------------------ #
+    #  GTK main loop management                                           #
+    # ------------------------------------------------------------------ #
+
+    def start_detached(self):
+        """Start GTK main loop in a background daemon thread"""
+        if self.running:
+            return
+        self.running = True
+        print("🚀 Starting AppIndicator3 tray (detached)…")
+        self._gtk_thread = threading.Thread(target=Gtk.main, daemon=True, name="gtk-tray")
+        self._gtk_thread.start()
+
+    def start(self):
+        """Start GTK main loop (blocking — use from main thread)"""
+        self.running = True
+        print("🚀 Starting AppIndicator3 tray…")
+        Gtk.main()
+
+    def stop(self):
+        """Stop the GTK main loop"""
+        if self.running:
+            self.running = False
+            print("🛑 Stopping tray…")
+            GLib.idle_add(Gtk.main_quit)
+
+    def run_in_background(self):
+        """Convenience: start detached and return thread"""
+        self.start_detached()
+        return self._gtk_thread
+
+    # ------------------------------------------------------------------ #
+    #  Status helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _connection_label(self) -> str:
+        labels = {
+            "connected":    "✓ Connected to ESP32",
+            "connecting":   "~ Connecting…",
+            "disconnected": "✗ Disconnected",
+            "error":        "! Connection Error",
         }
-        return status_map.get(self.connection_status, "[?] Unknown")
-    
+        return labels.get(self.connection_status, "? Unknown")
 
-    
-    def get_startup_setting(self):
-        """Get startup setting from config"""
+    def update_connection_status(self, status, port=None):
+        """Accept both old-style (bool, port) and new-style (str) calls from engine"""
+        if isinstance(status, bool):
+            # Called as update_connection_status(True, port) from engine.py
+            self.connection_status = "connected" if status else "disconnected"
+        else:
+            self.connection_status = status
+        tooltip = f"Bongo Cat - {self._connection_label()}"
+        GLib.idle_add(self._indicator.set_title, tooltip)
+        GLib.idle_add(self._rebuild_menu)
+
+    def update_typing_status(self, active: bool, wpm: float = 0):
+        self.typing_active = active
+        self.last_wpm = wpm
+        if active:
+            GLib.idle_add(self._indicator.set_title, f"Bongo Cat - Typing ({wpm:.0f} WPM)")
+        else:
+            GLib.idle_add(self._indicator.set_title, "Bongo Cat - Idle")
+
+    def refresh_menu(self):
+        GLib.idle_add(self._rebuild_menu)
+
+    def on_config_change(self, key: str, value):
+        if key.startswith('startup.'):
+            self.refresh_menu()
+
+    # ------------------------------------------------------------------ #
+    #  Config helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _get_autostart(self) -> bool:
         if self.config:
-            startup = self.config.get_startup_settings()
-            return startup.get('start_with_windows', True)
+            return self.config.get_startup_settings().get('start_on_login', False)
         return False
-    
-    def get_notifications_setting(self):
-        """Get notifications setting from config"""
+
+    def _get_notifications(self) -> bool:
         if self.config:
-            startup = self.config.get_startup_settings()
-            return startup.get('show_notifications', True)
-        return False
-    
-    def show_about(self, item=None):
-        """Show about dialog"""
-        self.show_notification(
-            "About Bongo Cat",
-            "Bongo Cat Typing Monitor v2.0\n\nMonitors your typing and shows cute cat animations!\n\nRight-click for more options."
-        )
-    
-    def show_settings(self, item=None):
-        """Show the settings GUI window"""
+            return self.config.get_startup_settings().get('show_notifications', True)
+        return True
+
+    def _on_autostart_toggled(self, widget):
+        if self.config:
+            self.config.set_setting('startup', 'start_on_login', widget.get_active())
+            self.config.save_config()
+
+    def _on_notifications_toggled(self, widget):
+        if self.config:
+            self.config.set_setting('startup', 'show_notifications', widget.get_active())
+            self.config.save_config()
+
+    # ------------------------------------------------------------------ #
+    #  Actions                                                             #
+    # ------------------------------------------------------------------ #
+
+    def show_notification(self, title: str, message: str):
+        """Send desktop notification via notify-send (most reliable on Wayland)"""
+        if not self._get_notifications():
+            return
         try:
-            print("⚙️ Opening settings window...")
-            
-            # Import here to avoid circular imports
-            from gui import BongoCatSettingsGUI
-            
-            # Create and show settings GUI in separate thread (simpler approach)
-            def create_and_show_gui():
-                try:
-                    import tkinter as tk
-                    
-                    if not self.settings_gui:
-                        print("🔧 Creating settings GUI...")
-                        
-                        # Create a new root window for the settings
-                        settings_root = tk.Tk()
-                        settings_root.withdraw()  # Hide the root
-                        
-                        self.settings_gui = BongoCatSettingsGUI(
-                            config_manager=self.config,
-                            engine=self.engine,
-                            on_close_callback=self.on_settings_closed,
-                            parent_root=settings_root
-                        )
-                    
-                    print("📱 Showing settings window...")
-                    self.settings_gui.show()
-                    
-                    # Start the GUI event loop for this window
-                    if hasattr(self.settings_gui, 'window') and self.settings_gui.window:
-                        self.settings_gui.window.mainloop()
-                        
-                except Exception as e:
-                    print(f"❌ Error creating settings GUI: {e}")
-                    self.show_notification("Error", f"Failed to open settings: {e}")
-            
-            # Run GUI in separate thread
-            import threading
-            gui_thread = threading.Thread(target=create_and_show_gui, daemon=True)
-            gui_thread.start()
-            print("🚀 Settings GUI started in separate thread")
-            
+            import subprocess
+            subprocess.Popen(
+                ["notify-send", "--app-name=BongoCat", title, message],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
         except Exception as e:
-            print(f"❌ Error starting settings GUI: {e}")
-            self.show_notification("Error", f"Failed to open settings: {e}")
-    
-    def on_settings_closed(self):
-        """Handle settings window being closed"""
+            print(f"⚠️ Notification error: {e}")
+
+    def show_settings(self, *_):
+        """Open settings GUI in a separate thread (tkinter must own its thread)"""
+        def _run():
+            try:
+                import tkinter as tk
+                from gui import BongoCatSettingsGUI
+
+                root = tk.Tk()
+                root.withdraw()
+                gui = BongoCatSettingsGUI(
+                    config_manager=self.config,
+                    engine=self.engine,
+                    on_close_callback=self._on_settings_closed,
+                    parent_root=root
+                )
+                self.settings_gui = gui
+                gui.show()
+                if hasattr(gui, 'window') and gui.window:
+                    gui.window.mainloop()
+            except Exception as e:
+                print(f"❌ Settings error: {e}")
+                self.show_notification("Error", f"Failed to open settings: {e}")
+
+        if self.settings_gui is None:
+            t = threading.Thread(target=_run, daemon=True, name="settings-gui")
+            t.start()
+        else:
+            print("⚠️ Settings already open")
+
+    def _on_settings_closed(self):
         self.settings_gui = None
-    
-    def reconnect_device(self, item=None):
-        """Reconnect to ESP32"""
-        if self.engine:
-            def reconnect_thread():
-                self.update_connection_status("connecting")
-                self.show_notification("Bongo Cat", "Attempting to reconnect...")
-                
-                # Disconnect first if connected
-                if self.engine.serial_conn and self.engine.serial_conn.is_open:
-                    self.engine.disconnect_serial()
-                
-                # Try to reconnect
-                if self.engine.connect_serial():
-                    self.update_connection_status("connected")
-                    self.show_notification("Bongo Cat", "Successfully reconnected to ESP32!")
-                else:
-                    self.update_connection_status("error")
-                    self.show_notification("Bongo Cat", "Failed to reconnect. Check USB connection.")
-            
-            threading.Thread(target=reconnect_thread, daemon=True).start()
-    
-    def disconnect_device(self, item=None):
-        """Disconnect from ESP32"""
+
+    def reconnect_device(self, *_):
+        if not self.engine:
+            return
+
+        def _reconnect():
+            self.update_connection_status("connecting")
+            self.show_notification("Bongo Cat", "Attempting to reconnect…")
+            if self.engine.serial_conn and self.engine.serial_conn.is_open:
+                self.engine.disconnect_serial()
+            if self.engine.connect_serial():
+                self.update_connection_status("connected")
+                self.show_notification("Bongo Cat", "Reconnected to ESP32!")
+            else:
+                self.update_connection_status("error")
+                self.show_notification("Bongo Cat", "Failed to reconnect. Check USB connection.")
+
+        threading.Thread(target=_reconnect, daemon=True).start()
+
+    def disconnect_device(self, *_):
         if self.engine:
             self.engine.disconnect_serial()
             self.update_connection_status("disconnected")
             self.show_notification("Bongo Cat", "Disconnected from ESP32")
-    
-    def toggle_startup(self, item=None):
-        """Toggle startup with Windows setting"""
-        if self.config:
-            current = self.get_startup_setting()
-            self.config.set_setting('startup', 'start_with_windows', not current)
-            self.config.save_config()
-            
-            status = "enabled" if not current else "disabled"
-            self.show_notification("Startup Setting", f"Start with Windows {status}")
-    
-    def toggle_notifications(self, item=None):
-        """Toggle notifications setting"""
-        if self.config:
-            current = self.get_notifications_setting()
-            self.config.set_setting('startup', 'show_notifications', not current)
-            self.config.save_config()
-            
-            status = "enabled" if not current else "disabled"
-            self.show_notification("Notifications", f"Notifications {status}")
-    
-    def exit_application(self, item=None):
-        """Exit the application"""
+
+    def exit_application(self, *_):
         self.show_notification("Bongo Cat", "Goodbye! 👋")
         self.stop()
-        
         if self.on_exit_callback:
             self.on_exit_callback()
         else:
             sys.exit(0)
-    
-    def update_connection_status(self, status: str):
-        """Update connection status"""
-        old_status = self.connection_status
-        self.connection_status = status
 
-        
-        # Update icon tooltip
-        status_text = self.get_connection_status().replace('🟢 ', '').replace('🟡 ', '').replace('🔴 ', '').replace('❌ ', '')
-        if self.icon:
-            self.icon.title = f"Bongo Cat - {status_text}"
-            # Refresh menu to update connection status display
-            self.refresh_menu()
-    
-    def update_typing_status(self, active: bool, wpm: float = 0):
-        """Update typing status"""
-        self.typing_active = active
-        self.last_wpm = wpm
-        
-        # Update tooltip with current status
-        if self.icon:
-            if active:
-                self.icon.title = f"Bongo Cat - Typing ({wpm:.0f} WPM)"
-            else:
-                self.icon.title = "Bongo Cat - Idle"
-    
-    def refresh_menu(self):
-        """Refresh the tray menu to reflect current settings"""
-        try:
-            if self.icon:
-                # Update the menu with current settings
-                self.icon.menu = self.create_menu()
+    # ------------------------------------------------------------------ #
+    #  Cleanup                                                             #
+    # ------------------------------------------------------------------ #
 
-        except Exception as e:
-            print(f"⚠️ Menu refresh error: {e}")
-    
-    def on_config_change(self, key: str, value):
-        """Handle configuration changes from settings GUI"""
-        # Refresh menu when startup settings change (affects checkboxes)
-        if key.startswith('startup.'):
+    def __del__(self):
+        if self._icon_tmp and os.path.exists(self._icon_tmp):
+            try:
+                os.unlink(self._icon_tmp)
+            except Exception:
+                pass
 
-            self.refresh_menu()
-    
-    def show_notification(self, title: str, message: str):
-        """Show system notification"""
-        try:
-            if self.icon and self.get_notifications_setting():
-                self.icon.notify(message, title)
-        except Exception as e:
-            print(f"⚠️ Notification error: {e}")
-    
-    def start(self):
-        """Start the system tray"""
-        if self.icon and not self.running:
-            self.running = True
-            print("🔄 Starting system tray...")
-            
-            # Show startup notification
-            self.show_notification("Bongo Cat", "Started successfully! Right-click the tray icon for options.")
-            
-            # Run the icon (this blocks)
-            self.icon.run()
-    
-    def stop(self):
-        """Stop the system tray"""
-        if self.icon and self.running:
-            self.running = False
-            print("🛑 Stopping system tray...")
-            self.icon.stop()
-    
-    def run_in_background(self):
-        """Run system tray in background thread"""
-        if not self.running:
-            tray_thread = threading.Thread(target=self.start, daemon=True)
-            tray_thread.start()
-            return tray_thread
-        return None
+
+# --------------------------------------------------------------------------- #
+#  Standalone test                                                             #
+# --------------------------------------------------------------------------- #
 
 def main():
-    """Test system tray independently"""
-    print("🧪 Testing System Tray...")
-    
-    # Create basic tray (without engine/config for testing)
+    print("🧪 Testing Bongo Cat System Tray (AppIndicator3)…")
     tray = BongoCatSystemTray()
-    
-    print("📱 System tray started. Check your system tray area!")
-    print("🖱️ Right-click the cat icon to see the menu")
+    print("📱 Tray started — check your bar's tray area")
     print("🛑 Use 'Exit' from the tray menu to close")
-    
     try:
-        # Start tray (this will block)
         tray.start()
     except KeyboardInterrupt:
-        print("\n🛑 Stopping...")
         tray.stop()
-    
-    print("✅ System tray test completed")
+    print("✅ Done")
+
 
 if __name__ == "__main__":
-    main() 
+    main()
